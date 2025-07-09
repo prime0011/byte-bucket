@@ -434,6 +434,7 @@ show_diff_and_confirm() {
     return 1
   fi
 }
+
  #########################
 ## Main Functions
 #########################
