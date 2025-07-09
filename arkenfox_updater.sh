@@ -852,7 +852,6 @@ update() {
   log "✅ [SUCCESS] Update complete."
 }
 
-
 # Uninstalls Arkenfox, restores Firefox prefs, removes backups, logs, and cleanup related files
 uninstall() {
   # Wait for Firefox to close before proceeding
