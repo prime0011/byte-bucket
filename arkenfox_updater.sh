@@ -768,12 +768,6 @@ update() {
     debug "🔍 [DEBUG] Debug mode enabled."
   fi
 
-  # Detect if we're running from an interactive terminal
-  local in_terminal=false
-  if [[ -t 1 ]]; then
-    in_terminal=true
-  fi
-
   echo "🔄 [ACTION] Starting update..."
 
   # Check dependencies
