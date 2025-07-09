@@ -107,6 +107,7 @@ fi
 
 # Output final debug state after parsing arguments
 debug "🔍 [DEBUG] After argument parsing: MODE='$MODE', NO_GUI='$NO_GUI', DEBUG_MODE='$DEBUG_MODE'."
+
  #########################
 ## Utility Functions
 #########################
