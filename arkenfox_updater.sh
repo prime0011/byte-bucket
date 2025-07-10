@@ -467,8 +467,11 @@ create_updater_script() {
   mkdir -p "$ARKENFOX_DIR"
 
   # Define LOG_FILE path
-  readonly local LOG_FILE="$HOME/Library/Application Support/arkenfox/logs/arkenfox-launchd.log"
-  mkdir -p "$(dirname "$LOG_FILE")"  # Make sure log dir exists
+  local LOG_FILE="$HOME/Library/Application Support/arkenfox/logs/arkenfox-launchd.log"
+  readonly LOG_FILE
+
+  # Make sure log dir exists
+  mkdir -p "$(dirname "$LOG_FILE")"  
 
   cat <<EOF > "$ARKENFOX_DIR/update.sh"
 #!/usr/bin/env bash
@@ -572,7 +575,8 @@ install_launchd() {
   mkdir -p "$LOG_DIR"
   
   # Define the launchd plist file path
-  readonly local LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+  local LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+  readonly LAUNCHD_PLIST
   
   # Provide user feedback about the launchd agent installation
   echo "🔄 [ACTION] Installing Arkenfox Updater agent..."
