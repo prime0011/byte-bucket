@@ -107,10 +107,22 @@ fi
 
 # Output final debug state after parsing arguments
 debug "🔍 [DEBUG] After argument parsing: MODE='$MODE', NO_GUI='$NO_GUI', DEBUG_MODE='$DEBUG_MODE'."
-
  #########################
 ## Utility Functions
 #########################
+
+# Exit with an error message
+error_exit() {
+  local message="$1"  
+
+  # Output the error message to stderr (console)
+  echo "$message" >&2  
+
+  # Log the error message to the log file
+  log "$message"       
+
+  exit 1
+}
 
 # Log function to append log messages to a file and output to console
 log() {
@@ -119,6 +131,11 @@ log() {
   # Append message to the log file with timestamp
   mkdir -p "$LOG_DIR"
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" >> "$LOG_DIR/arkenfox.log"
+}
+
+# Case-insensitive lowercase fallback for macOS Bash 3.2
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 # Rotate logs if they exceed 1MB in size
@@ -172,19 +189,6 @@ system_snapshot() {
 
   # Log the successful completion of the snapshot
   log "✅ [SUCCESS] System snapshot '$snapshot_label' completed and saved."
-}
-
-# Exit with an error message
-error_exit() {
-  local message="$1"  
-
-  # Output the error message to stderr (console)
-  echo "$message" >&2  
-
-  # Log the error message to the log file
-  log "$message"       
-
-  exit 1
 }
 
 # Check if Xcode Command Line Tools are installed
@@ -258,8 +262,15 @@ check_git() {
 # Find the Firefox default profile directory
 find_profile() {
   debug "🔍 [DEBUG] Searching for Firefox default-release profile..."
+
   local firefox_profile_dir
-  firefox_profile_dir=$(find "$HOME/Library/Application Support/Firefox/Profiles" -type d -name "*.default-release" | head -n 1)
+  firefox_profile_dir=$(find "$HOME/Library/Application Support/Firefox/Profiles" -type d -name "*.default-release" 2>/dev/null | head -n 1)
+
+  if [[ -z "$firefox_profile_dir" ]]; then
+    echo "❌ [ERROR] Could not find Firefox default-release profile. Launch Firefox at least once." >&2
+    return 1
+  fi
+
   echo "ℹ️ [INFO] Firefox profile directory: $firefox_profile_dir"
 }
 
@@ -275,11 +286,16 @@ backup_firefox_config() {
   mkdir -p "$backup_directory"
 
   local backup_manifest_file="$backup_directory/manifest.txt"
-  > "$backup_manifest_file"
+
+  # Write header information to manifest
+  echo "# Firefox backup created on $(date)" > "$backup_manifest_file"
+  echo "# Profile: $user_profile_dir" >> "$backup_manifest_file"
+  echo "" >> "$backup_manifest_file"  # Blank line for readability
 
   for file in "${FILES_TO_BACKUP[@]}"; do
     if [[ -f "$user_profile_dir/$file" ]]; then
       cp "$user_profile_dir/$file" "$backup_directory/"
+      echo "$file" >> "$backup_manifest_file"
       echo "✅ [SUCCESS] Successfully backed up $file from $user_profile_dir."
       log "✅ [SUCCESS] Successfully backed up $file from $user_profile_dir."
     else
@@ -299,7 +315,9 @@ restore_firefox_backup() {
 
   # Determine the user profile directory
   local user_profile_dir
-  user_profile_dir=$(find_profile)
+  if ! user_profile_dir=$(find_profile); then
+    error_exit "❌ [ERROR] Could not locate the Firefox profile directory. Aborting restore."
+  fi
   debug "🔍 [DEBUG] Restoring Firefox backup to profile $user_profile_dir."
 
   # Find the latest backup directory
@@ -320,11 +338,13 @@ restore_firefox_backup() {
 
   # Iterate over the files listed in the manifest file
   while IFS= read -r file; do
+    [[ "$file" =~ ^#.*$ || -z "$file" ]] && continue  # Skip comment or empty lines
+
     if [[ -f "$backup_directory/$file" ]]; then
       if [[ "$file" == "prefs.js" ]]; then
         echo "⚠️ [WARNING] prefs.js is about to be restored from backup."
         read -rp "📝 [COMMAND] Restore prefs.js from backup? [y/N]: " user_confirmation_restore
-        user_confirmation_restore="${user_confirmation_restore,,}"  # lowercase
+        user_confirmation_restore=$(to_lower "$user_confirmation_restore")
         if [[ "$user_confirmation_restore" != "y" && "$user_confirmation_restore" != "yes" ]]; then
           echo "ℹ️ [INFO] User declined to restore prefs.js. Skipping restoration."
           continue
@@ -424,7 +444,7 @@ show_diff_and_confirm() {
 
   # Ask user for confirmation
   read -rp "📝 [COMMAND] Apply these changes to user.js? [y/N]: " user_confirmation
-  user_confirmation="${user_confirmation,,}"  # Convert to lowercase
+  user_confirmation=$(to_lower "$user_confirmation")
 
   # Apply changes based on user confirmation
   if [[ "$user_confirmation" == "y" || "$user_confirmation" == "yes" ]]; then
@@ -435,7 +455,6 @@ show_diff_and_confirm() {
     return 1
   fi
 }
-
  #########################
 ## Main Functions
 #########################
@@ -608,7 +627,7 @@ install_automator() {
 
     # Prompt user to overwrite or skip (default to "no")
     read -rp "📝 [COMMAND] Automator Quick Action already exists. Do you want to overwrite it? (y/N): " confirm
-    confirm="${confirm,,}"  # lowercase the response
+    confirm=$(to_lower "$confirm")
 
     # Default to "no" if no input is provided (i.e., user presses Enter)
     if [[ -z "$confirm" || "$confirm" != "y" && "$confirm" != "yes" ]]; then
@@ -717,9 +736,7 @@ install() {
 
   # Find the Firefox profile directory
   local profile_dir
-  profile_dir=$(find_profile)
-  
-  if [[ -z "$profile_dir" ]]; then
+  if ! profile_dir=$(find_profile); then
     error_exit "❌ [ERROR] Could not find Firefox default-release profile. Launch Firefox at least once before installing."
   fi
 
@@ -770,6 +787,12 @@ update() {
     debug "🔍 [DEBUG] Debug mode enabled."
   fi
 
+  # Detect if we're running from an interactive terminal
+  local in_terminal=false
+  if [[ -t 1 ]]; then
+    in_terminal=true
+  fi
+
   echo "🔄 [ACTION] Starting update..."
 
   # Check dependencies
@@ -794,8 +817,9 @@ update() {
 
     # Find Firefox profile directory
     local profile_dir
-    profile_dir=$(find_profile)
-    [[ -z "$profile_dir" ]] && error_exit "❌ [ERROR] Could not find Firefox profile."
+    if ! profile_dir=$(find_profile); then
+      error_exit "❌ [ERROR] Could not find Firefox profile. Launch Firefox at least once before updating."
+    fi
 
     # Merge user.js with user-overrides.js for final config
     local merged_file
@@ -868,9 +892,7 @@ uninstall() {
 
   # Find Firefox profile directory
   local profile_dir
-  profile_dir=$(find_profile)
-
-  if [[ -z "$profile_dir" ]]; then
+  if ! profile_dir=$(find_profile); then
     echo "⚠️ [WARNING] Could not find Firefox profile. Skipping prefs cleanup."
   else
     # Check if any backup exists
@@ -885,7 +907,7 @@ uninstall() {
           if [[ "$file" == "prefs.js" ]]; then
             echo "⚠️ [WARNING] prefs.js exists but no backup was found."
             read -rp "📝 [COMMAND] Delete prefs.js anyway? [y/N]: " confirm_delete_prefs
-            confirm_delete_prefs="${confirm_delete_prefs,,}"
+            confirm_delete_prefs=$(to_lower "$confirm_delete_prefs")
             if [[ "$confirm_delete_prefs" != "y" && "$confirm_delete_prefs" != "yes" ]]; then
               echo "ℹ️ [INFO] Skipping prefs.js deletion."
               log "ℹ️ [INFO] User declined to delete prefs.js."  
@@ -926,7 +948,7 @@ uninstall() {
 
   # Prompt user to delete backups and logs
   read -rp "📝 [COMMAND] Do you want to delete Arkenfox backups and logs? [y/N]: " confirm_delete
-  confirm_delete="${confirm_delete,,}" # lowercase
+  confirm_delete=$(to_lower "$confirm_delete")
 
   if [[ "$confirm_delete" == "y" || "$confirm_delete" == "yes" ]]; then
     echo "🔄 [ACTION] Deleting backups and logs..."
