@@ -482,7 +482,7 @@ show_diff_and_confirm() {
 ## Main Functions
 #########################
 
-# Installs the launchd plist to schedule the agent to run the Arkenfox update.sh script
+# Installs the launchd plist to schedule the agent to run the Arkenfox update
 install_launchd() {
   debug "🔍 [DEBUG] Installing launchd plist..."
 
@@ -528,6 +528,7 @@ EOF
   info "ℹ️ [INFO] Arkenfox Updater agent has been scheduled to run daily."
 }
 
+# Installs Automator Quick Action workflow to run the Arkenfox update from macOS Services menu
 install_automator() {
   if [[ "$NO_GUI" -eq 1 ]]; then
     debug "🔍 [DEBUG] Skipping Automator installation because --nogui is set."
@@ -679,6 +680,7 @@ install() {
   debug "🔍 [DEBUG] Installation complete."
 }
 
+# Updates Arkenfox by pulling the latest repo changes, merging configs, and updating Firefox user.js
 update() {
   local DISPLAY_COUNT=3
   readonly DISPLAY_COUNT
