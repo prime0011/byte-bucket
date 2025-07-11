@@ -645,9 +645,6 @@ install() {
   mkdir -p "$ARKENFOX_DIR"
   mkdir -p "$LOG_DIR"
 
-  # Create the updater script
-  create_updater_script
-
   # Find the Firefox profile directory
   local profile_dir
   if ! profile_dir=$(find_profile); then
