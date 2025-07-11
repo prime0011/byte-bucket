@@ -741,77 +741,88 @@ update() {
     # No changes detected
     if cmp -s "$tmp_new_userjs" "$old_userjs"; then
       if [[ "$base_changed" == "yes" ]]; then
-        info "✅ [SUCCESS] Downloaded latest Arkenfox user.js. Firefox profile user.js already up to date."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Both user.js and user-overrides.js were checked, and no new changes were needed."
+        info "✅ [SUCCESS] Downloaded latest Arkenfox user.js — Firefox profile already up to date."
+        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Latest user.js downloaded, but your profile was already up to date."
       else
-        info "ℹ️ [INFO] Arkenfox is already up to date. No repo or override changes."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "ℹ️ Arkenfox is already up to date. No updates or preferences were applied."
+        info "ℹ️ [INFO] Arkenfox is already up to date — no changes in repo or user-overrides.js."
+        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "ℹ️ Arkenfox is already up to date. No updates were needed — your profile remains unchanged."
       fi
     else
-      # New user.js is different; apply changes
-      mv "$tmp_new_userjs" "$old_userjs"
-      merge_wrote_changes="yes"
-
-      # Calculate and log differences
-      local diff_output=""
-      if [[ -f "$tmp_old_userjs" ]]; then
-        diff_output=$(diff -u "$tmp_old_userjs" "$old_userjs" || true)
+      if [[ "$AUTO_UPDATE_MODE" != "1" ]]; then
+        # INTERACTIVE UPDATE: Show diff and prompt
+        if show_diff_and_confirm "$profile_dir" "$tmp_new_userjs"; then
+          mv "$tmp_new_userjs" "$old_userjs"
+          merge_wrote_changes="yes"
+        else
+          info "ℹ️ [INFO] Update declined — user.js will not be modified."
+        fi
       else
-        diff_output="No previous user.js found. New preferences applied."
+        # AUTO UPDATE: Skip confirmation, apply changes
+        mv "$tmp_new_userjs" "$old_userjs"
+        merge_wrote_changes="yes"
+        info "✅ [SUCCESS] Arkenfox update applied automatically without user confirmation."
       fi
 
-      # Always log the full diff (for debugging / auditing)
-      {
-        echo "=== Arkenfox update diff at $(date) ==="
-        echo "$diff_output"
-        echo "========================================"
-      } >> "$LOG_FILE"
+      # Log and summarize only if changes were written
+      if [[ "$merge_wrote_changes" == "yes" ]]; then
+        local diff_output=""
+        if [[ -f "$tmp_old_userjs" ]]; then
+          diff_output=$(diff -u "$tmp_old_userjs" "$old_userjs" || true)
+        else
+          diff_output="No previous user.js found. New preferences applied."
+        fi
 
-      # Summarize changed prefs, if any
-      if [[ -f "$tmp_old_userjs" ]]; then
-        changed_prefs=$(echo "$diff_output" | grep '^+user_pref' | grep -v '^+++')
-        count=$(echo "$changed_prefs" | wc -l | tr -d ' ')
-        summary=$(echo "$changed_prefs" | head -n "$DISPLAY_COUNT" | sed -E 's/^\+user_pref\("([^"]+)".*/\1/' | paste -sd ', ' -)
-        rm -f "$tmp_old_userjs"
+        {
+          echo "=== Arkenfox update diff at $(date) ==="
+          echo "$diff_output"
+          echo "========================================"
+        } >> "$LOG_FILE"
 
-        info "✅ [SUCCESS] $count prefs updated: $summary"
+        if [[ -f "$tmp_old_userjs" ]]; then
+          changed_prefs=$(echo "$diff_output" | grep '^+user_pref' | grep -v '^+++')
+          count=$(echo "$changed_prefs" | wc -l | tr -d ' ')
+          summary=$(echo "$changed_prefs" | head -n "$DISPLAY_COUNT" | sed -E 's/^\+user_pref\("([^"]+)".*/\1/' | paste -sd ', ' -)
+          rm -f "$tmp_old_userjs"
 
-        if [[ "$AUTO_UPDATE_MODE" == "1" ]]; then
-          if [[ "$count" -le "$DISPLAY_COUNT" ]]; then
-            notify "✅ Arkenfox update applied. $count preferences updated: $summary. 🔄 Please restart Firefox for the changes to take effect."
+          info "✅ [SUCCESS] $count prefs updated: $summary"
+
+          if [[ "$AUTO_UPDATE_MODE" == "1" ]]; then
+            if [[ "$count" -le "$DISPLAY_COUNT" ]]; then
+              notify "✅ Arkenfox update applied. $count preferences updated: $summary. 🔄 Please restart Firefox for the changes to take effect."
+            else
+              local more_count=$((count - DISPLAY_COUNT))
+              notify "✅ Arkenfox update applied. $count preferences updated: $summary… (+$more_count more). 🔄 Please restart Firefox for the changes to take effect."
+            fi
+          fi
+        else
+          info "⚙️ [CONFIG] Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
+          [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
+        fi
+
+        # 🔁 POST-UPDATE CONTEXT MESSAGE
+        if [[ "$base_changed" == "yes" ]]; then
+          if pgrep -x "firefox" >/dev/null; then
+            info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile. Please restart Firefox for the changes to take effect."
           else
-            local more_count=$((count - DISPLAY_COUNT))
-            notify "✅ Arkenfox update applied. $count preferences updated: $summary… (+$more_count more). 🔄 Please restart Firefox for the changes to take effect."
+            info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile."
+          fi
+        else
+          if pgrep -x "firefox" >/dev/null; then
+            info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile. Please restart Firefox for the changes to take effect."
+          else
+            info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile."
           fi
         fi
-      else
-        info "⚙️ [CONFIG] Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
       fi
 
-      # Post-update context message
-      if [[ "$base_changed" == "yes" ]]; then
-        if pgrep -x "firefox" >/dev/null; then
-          info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile. Please restart Firefox for the changes to take effect."
-        else
-          info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile."
-        fi
-      else
-        if pgrep -x "firefox" >/dev/null; then
-          info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile. Please restart Firefox for the changes to take effect."
-        else
-          info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile."
-        fi
-      fi
+      # Clean up new temp file
+      rm -f "$tmp_new_userjs"
     fi
-
-    rm -f "$tmp_new_userjs"
   else
     error_exit "❌ [ERROR] Repository directory missing or corrupted: $REPO_DIR"
   fi
 
   rotate_log
-  debug "🔍 [DEBUG] Update complete."
   info "✅ [SUCCESS] Update complete."
 }
 
