@@ -153,12 +153,12 @@ info() {
 
 # Notify function to send macOS notifications and log events
 notify() {
-  local msg="\$1"
+  local msg="$1"
   if command -v osascript &>/dev/null; then
-    osascript -e "display notification \"\$msg\" with title \"Arkenfox Updater\""
+    osascript -e "display notification \"$msg\" with title \"Arkenfox Updater\""
   fi
   # Log the message with timestamp
-  echo "\$(date '+%Y-%m-%d %H:%M:%S') \$msg" >> "\$LOG_FILE"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE"
 }
 
 # Rotate logs if they exceed 1MB in size
@@ -189,28 +189,31 @@ rotate_log() {
 system_snapshot() {
   local snapshot_label="$1"
   
-  # Debug message about starting the snapshot
   debug "🔍 [DEBUG] Taking system snapshot: $snapshot_label"
 
-  # Create snapshots directory
-  mkdir -p "$LOG_DIR/snapshots" || { log "❌ [ERROR] Failed to create snapshots dir."; exit 1; }
+  # Ensure snapshots directory exists, error_exit on failure
+  if ! mkdir -p "$LOG_DIR/snapshots"; then
+    error_exit "❌ [ERROR] Failed to create snapshots directory at $LOG_DIR/snapshots."
+  fi
 
-  # Log the start of the snapshot process
   log "🔄 [ACTION] === $snapshot_label system snapshot at $(date) ==="
 
-  # Save the system snapshot details
-  {
+  # Redirect output to snapshot file, error_exit if writing fails
+  if ! {
     sw_vers
     echo "Disk Usage:"
     df -h /
     echo "Memory:"
-    vm_stat || echo "vm_stat failed"
+    if ! vm_stat; then
+      echo "vm_stat failed"
+    fi
     echo "Processes:"
     ps aux | head -20
     echo
-  } >> "$LOG_DIR/snapshots/$snapshot_label.txt" || { log "❌ [ERROR] Failed to write snapshot."; exit 1; }
+  } >> "$LOG_DIR/snapshots/$snapshot_label.txt"; then
+    error_exit "❌ [ERROR] Failed to write system snapshot to $LOG_DIR/snapshots/$snapshot_label.txt."
+  fi
 
-  # Log the successful completion of the snapshot
   log "✅ [SUCCESS] System snapshot '$snapshot_label' completed and saved."
 }
 
@@ -219,22 +222,19 @@ check_clt() {
   debug "🔍 [DEBUG] Checking Xcode Command Line Tools..."
 
   if ! pkgutil --pkg-info=com.apple.pkg.CLTools_Executables &>/dev/null; then
-    echo "🔄 [ACTION] Installing Xcode Command Line Tools..."
-    debug "🔍 [DEBUG] Xcode Command Line Tools not found, installing..."
+    info "🔄 [ACTION] Installing Xcode Command Line Tools..."
+    debug "🔍 [DEBUG] Xcode Command Line Tools not found, initiating installation..."
+
+    # Setup trap early to catch SIGINT during wait
+    trap 'echo; error_exit "🚨 [CRITICAL] Installation interrupted by user."' SIGINT
 
     set +e
     xcode-select --install 2>/dev/null || true
     set -e
 
-    trap 'echo; error_exit "🚨 [CRITICAL] Installation interrupted by user"' SIGINT
-
     local tries=0
-    local max_tries=20  # Default value if not provided via environment variable
-    local wait_sec=15   # Default value if not provided via environment variable
-
-    # Override with environment variables if they are set
-    max_tries="${MAX_TRIES:-$max_tries}"
-    wait_sec="${WAIT_SEC:-$wait_sec}"
+    local max_tries="${MAX_TRIES:-20}"
+    local wait_sec="${WAIT_SEC:-15}"
 
     echo -n "🔄 [ACTION] Waiting for Command Line Tools installation"
 
@@ -248,8 +248,8 @@ check_clt() {
 
       if (( tries == 4 )); then
         echo
-        echo "⚠️ [WARNING] Reminder: If you see a popup asking to install Command Line Tools, please confirm it."
-        echo "⚠️ [WARNING] Please confirm the Command Line Tools installer popup to continue installation."
+        info "⚠️ [WARNING] Reminder: If you see a popup asking to install Command Line Tools, please confirm it."
+        info "⚠️ [WARNING] Please confirm the installer popup to continue installation."
         echo -n "🔄 [ACTION] Waiting for Command Line Tools installation"
       fi
 
@@ -257,29 +257,31 @@ check_clt() {
       sleep "$wait_sec"
     done
 
-    # Final completion message
-    echo "✅ [SUCCESS] Command Line Tools installation complete."
+    echo
+    info "✅ [SUCCESS] Command Line Tools installation complete."
 
     sudo xcode-select --switch /Library/Developer/CommandLineTools
 
     touch "$GIT_MARKER"
     debug "🔍 [DEBUG] Xcode Command Line Tools installed successfully."
+
+    # Reset trap after install
+    trap - SIGINT  
   else
+    log "ℹ️ [INFO] Xcode Command Line Tools already installed."
     debug "🔍 [DEBUG] Xcode Command Line Tools already installed."
   fi
-
-  # Reset the trap after installation
-  trap - SIGINT
 }
 
 # Check if Git is installed
 check_git() {
   debug "🔍 [DEBUG] Checking for git command..."
+
   if ! command -v git &>/dev/null; then
     error_exit "❌ [ERROR] Git is not installed. Please install Git via Homebrew (brew install git) or from https://git-scm.com"
-  else
-    debug "🔍 [DEBUG] Git found."
   fi
+
+  log "✅ [SUCCESS] Git is installed."
 }
 
 # Find the Firefox default profile directory
@@ -290,11 +292,11 @@ find_profile() {
   firefox_profile_dir=$(find "$HOME/Library/Application Support/Firefox/Profiles" -type d -name "*.default-release" 2>/dev/null | head -n 1)
 
   if [[ -z "$firefox_profile_dir" ]]; then
-    echo "❌ [ERROR] Could not find Firefox default-release profile. Launch Firefox at least once." >&2
-    return 1
+    error_exit "❌ [ERROR] Could not find Firefox default-release profile. Launch Firefox at least once."
   fi
 
-  echo "ℹ️ [INFO] Firefox profile directory: $firefox_profile_dir"
+  # Return the profile path silently
+  echo "$firefox_profile_dir"
 }
 
 # Backup Firefox configuration files
@@ -311,28 +313,33 @@ backup_firefox_config() {
   local backup_manifest_file="$backup_directory/manifest.txt"
 
   # Write header information to manifest
-  echo "# Firefox backup created on $(date)" > "$backup_manifest_file"
-  echo "# Profile: $user_profile_dir" >> "$backup_manifest_file"
-  echo "" >> "$backup_manifest_file"  # Blank line for readability
+  {
+    echo "# Firefox backup created on $(date)"
+    echo "# Profile: $user_profile_dir"
+    echo ""
+  } > "$backup_manifest_file"
 
   for file in "${FILES_TO_BACKUP[@]}"; do
     if [[ -f "$user_profile_dir/$file" ]]; then
-      cp "$user_profile_dir/$file" "$backup_directory/"
-      echo "$file" >> "$backup_manifest_file"
-      echo "✅ [SUCCESS] Successfully backed up $file from $user_profile_dir."
-      log "✅ [SUCCESS] Successfully backed up $file from $user_profile_dir."
+      if cp "$user_profile_dir/$file" "$backup_directory/"; then
+        info "✅ [SUCCESS] Successfully backed up $file from $user_profile_dir."
+        echo "$file" >> "$backup_manifest_file"
+      else
+        info "❌ [ERROR] Failed to back up $file from $user_profile_dir."
+      fi
     else
       debug "🔍 [DEBUG] The file $file does not exist. Skipping backup."
     fi
   done
 
-  echo "ℹ️ [INFO] Backup directory created: $backup_directory" > "$ARKENFOX_DIR/.last-backup"
+  info "ℹ️ [INFO] Backup directory created: $backup_directory"
+  echo "$backup_directory" > "$ARKENFOX_DIR/.last-backup"
 }
 
 # Restore Firefox backup if possible
 restore_firefox_backup() {
   if pgrep -x "firefox" >/dev/null; then
-    echo "⚠️ [WARNING] Firefox is currently running. Please close it before restoring the backup."
+    info "⚠️ [WARNING] Firefox is currently running. Please close it before restoring the backup."
     exit 1
   fi
 
@@ -348,16 +355,18 @@ restore_firefox_backup() {
   backup_directory=$(ls -td "$LOG_DIR/backups/"*/ 2>/dev/null | head -1 || true)
 
   if [[ -z "$backup_directory" ]]; then
-    debug "🔍 [DEBUG] No backup directory found. Skipping restore."
+    info "ℹ️ [INFO] No backup directory found. Skipping restore."
     return
   fi
 
   local backup_manifest_file="$backup_directory/manifest.txt"
 
   if [[ ! -f "$backup_manifest_file" ]]; then
-    debug "🔍 [DEBUG] No manifest file found in backup. Skipping restore."
+    info "ℹ️ [INFO] No manifest file found in backup. Skipping restore."
     return
   fi
+
+  info "🔄 [ACTION] Restoring Firefox backup from: $backup_directory"
 
   # Iterate over the files listed in the manifest file
   while IFS= read -r file; do
@@ -365,18 +374,18 @@ restore_firefox_backup() {
 
     if [[ -f "$backup_directory/$file" ]]; then
       if [[ "$file" == "prefs.js" ]]; then
-        echo "⚠️ [WARNING] prefs.js is about to be restored from backup."
+        info "⚠️ [WARNING] prefs.js is about to be restored from backup."
         read -rp "📝 [COMMAND] Restore prefs.js from backup? [y/N]: " user_confirmation_restore
         user_confirmation_restore=$(to_lower "$user_confirmation_restore")
         if [[ "$user_confirmation_restore" != "y" && "$user_confirmation_restore" != "yes" ]]; then
-          echo "ℹ️ [INFO] User declined to restore prefs.js. Skipping restoration."
+          info "ℹ️ [INFO] User declined to restore prefs.js; restoration skipped."
           continue
         fi
       fi
       cp "$backup_directory/$file" "$user_profile_dir/$file"
-      echo "✅ [SUCCESS] Restored $file from backup."
+      info "✅ [SUCCESS] Restored $file to $user_profile_dir from backup."
     else
-      debug "🔍 [DEBUG] $file listed in manifest but not found in backup."
+      info "⚠️ [WARNING] $file listed in manifest but not found in backup."
     fi
   done < "$backup_manifest_file"
 
@@ -384,97 +393,98 @@ restore_firefox_backup() {
   for file in "${FILES_TO_BACKUP[@]}"; do
     if ! grep -qx "$file" "$backup_manifest_file" && [[ -f "$user_profile_dir/$file" ]]; then
       rm -f "$user_profile_dir/$file"
-      echo "⚠️ [WARNING] Removed $file as it was not backed up."
+      info "⚠️ [WARNING] Removed $file from profile because it was not found in the backup."
     fi
   done
 }
 
 # Merge user.js and user-overrides.js, returning the merged file path
 merge_userjs() {
-  local user_profile_dir="$1"                   
-  local user_profile_js_path="$user_profile_dir/user.js" 
-  local merge_conflicts_file="$LOG_DIR/merge-conflicts.log" 
-  local temp_merge_file                        
+  local user_profile_dir="$1"
+  local user_profile_js_path="$user_profile_dir/user.js"
+  local merge_conflicts_file="$LOG_DIR/merge-conflicts.log"
+  local temp_merge_file
   temp_merge_file=$(mktemp)
 
-  mkdir -p "$LOG_DIR"                          
-  log "ℹ️ [INFO] Merging Arkenfox user.js with overrides..."
+  mkdir -p "$LOG_DIR"
+  info "ℹ️ [INFO] Merging Arkenfox user.js with overrides..."
 
-  # Clear any existing merge logs or conflict files
+  # Clear previous merge logs or conflict files
   rm -f "$LOG_DIR"/{overrides.txt,conflicts.txt,"$merge_conflicts_file"}
 
-  # Extract preferences from the base user.js and sort them
+  # Extract preference keys from the base user.js and sort them
   grep '^user_pref' "$REPO_DIR/user.js" | sed -E 's/user_pref\("([^"]+)",.*/\1/' | sort > "$LOG_DIR/base.txt"
 
-  # If an overrides file exists, process it
+  # If overrides file exists, process it
   if [[ -f "$USER_OVERRIDES" ]]; then
-    # Extract preferences from the user overrides and sort them
+    debug "🔍 [DEBUG] Processing user-overrides.js for conflicts..."
+
+    # Extract preference keys from the overrides file and sort them
     grep '^user_pref' "$USER_OVERRIDES" | sed -E 's/user_pref\("([^"]+)",.*/\1/' | sort > "$LOG_DIR/overrides.txt"
 
-    # Find common preferences between base and overrides (conflicts)
+    # Detect conflicts (overlapping keys)
     comm -12 "$LOG_DIR/base.txt" "$LOG_DIR/overrides.txt" > "$LOG_DIR/conflicts.txt"
 
-    # If conflicts exist, notify the user and log the conflicts
     if [[ -s "$LOG_DIR/conflicts.txt" ]]; then
-      echo "⚠️ [WARNING] Conflict(s) detected in user-overrides.js. Please review the conflicts."
       cp "$LOG_DIR/conflicts.txt" "$merge_conflicts_file"
-      log "⚠️ [WARNING] Overridden preferences written to $merge_conflicts_file."
+      info "⚠️ [WARNING] Conflict(s) detected between user.js and user-overrides.js. Conflicting preferences saved to: $merge_conflicts_file"
     else
-      log "ℹ️ [INFO] No conflicts detected between user.js and user-overrides.js."
+      info "ℹ️ [INFO] No conflicts detected between user.js and user-overrides.js."
     fi
 
-    # Merge the base user.js and user-overrides.js into the temporary merge file
+    # Merge base and overrides into a temporary file
     cat "$REPO_DIR/user.js" "$USER_OVERRIDES" > "$temp_merge_file"
   else
-    log "ℹ️ [INFO] No user-overrides.js found. Using base user.js only."
+    info "ℹ️ [INFO] No user-overrides.js file found — using base user.js only."
     cat "$REPO_DIR/user.js" > "$temp_merge_file"
   fi
 
-  # Return the path to the merged file
+  debug "🔍 [DEBUG] Merged user.js written to temporary file: $temp_merge_file"
+
+  # Output the merged file path
   echo "$temp_merge_file"
 }
 
 # Show differences between current and merged user.js, asking for confirmation to apply changes
 show_diff_and_confirm() {
-  local profile_user_js_path="$1/user.js"  
-  local merged_user_js_path="$2"              
-  local user_confirmation  
-  
-  # Check if diff command is available
+  local profile_user_js_path="$1/user.js"
+  local merged_user_js_path="$2"
+  local user_confirmation
+
+  # Check if diff is available
   if ! command -v diff >/dev/null 2>&1; then
-    echo "⚠️ [WARNING] Diff command not found. Skipping diff display."
+    info "⚠️ [WARNING] 'diff' command not found. Skipping difference display."
     return 0
   fi
 
-  # If no profile.js, inform and exit
+  # If no existing user.js, nothing to compare — just inform
   if [[ ! -f "$profile_user_js_path" ]]; then
-    echo "ℹ️ [INFO] No existing user.js found. This will be added."
+    info "ℹ️ [INFO] No existing user.js found — a new one will be created."
     return 0
   fi
 
-  # Check for differences between the profile and merged files
+  # If no differences, skip prompt
   if cmp -s "$profile_user_js_path" "$merged_user_js_path"; then
-    debug "ℹ️ [INFO] No differences detected between current and merged user.js."
+    debug "🔍 [DEBUG] No differences between current and merged user.js."
     return 0
   fi
 
-  # Show the differences
-  echo "ℹ️ [INFO] Showing differences between current and updated user.js:"
+  # Show unified diff using less (if terminal attached)
+  info "ℹ️ [INFO] Showing changes between current and updated user.js:"
   echo "--------------------------------------------------"
   diff -u "$profile_user_js_path" "$merged_user_js_path" | less -R || true
   echo "--------------------------------------------------"
   echo
 
-  # Ask user for confirmation
+  # Prompt user for confirmation
   read -rp "📝 [COMMAND] Apply these changes to user.js? [y/N]: " user_confirmation
   user_confirmation=$(to_lower "$user_confirmation")
 
-  # Apply changes based on user confirmation
   if [[ "$user_confirmation" == "y" || "$user_confirmation" == "yes" ]]; then
-    echo "ℹ️ [INFO] Changes applied to user.js."
+    info "✅ [SUCCESS] Changes confirmed — user.js will be updated."
     return 0
   else
-    echo "ℹ️ [INFO] Changes not applied to user.js."
+    info "ℹ️ [INFO] Changes declined — user.js will not be modified."
     return 1
   fi
 }
@@ -732,10 +742,10 @@ update() {
     if cmp -s "$tmp_new_userjs" "$old_userjs"; then
       if [[ "$base_changed" == "yes" ]]; then
         info "✅ [SUCCESS] Downloaded latest Arkenfox user.js. Firefox profile user.js already up to date."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. No changes to Firefox profile needed."
+        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Both user.js and user-overrides.js were checked, and no new changes were needed."
       else
         info "ℹ️ [INFO] Arkenfox is already up to date. No repo or override changes."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "ℹ️ Arkenfox is already up-to-date. No updates or preferences were applied."
+        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "ℹ️ Arkenfox is already up to date. No updates or preferences were applied."
       fi
     else
       # New user.js is different; apply changes
@@ -775,8 +785,8 @@ update() {
           fi
         fi
       else
-        info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. No preferences changed."
+        info "⚙️ [CONFIG] Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
+        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
       fi
 
       # Post-update context message
