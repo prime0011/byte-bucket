@@ -487,6 +487,34 @@ show_diff_and_confirm() {
     info "ℹ️ [INFO] Changes declined — user.js will not be modified."
     return 1
   fi
+}  # Waits for Firefox to close before proceeding, with a custom message and interactive choice
+wait_for_firefox_to_close() {
+  local message="$1"  # Custom message to show
+  local wait_for_user="$2"  # Flag to determine if user interaction is allowed (optional)
+
+  # Check if Firefox is running
+  while pgrep -x "firefox" >/dev/null; do
+    # Show message and ask the user what they want to do (if in interactive mode)
+    if [[ "$wait_for_user" != "0" ]]; then
+      info "$message"
+      read -rp "📝 [COMMAND] Do you want to wait for Firefox to close? [y/N]: " confirm
+      confirm=$(to_lower "$confirm")
+      if [[ "$confirm" != "y" ]]; then
+        info "⚠️ [WARNING] Update aborted. Please close Firefox manually and try again."
+        return 1  # Exit with an error if the user does not want to wait
+      fi
+
+      # Wait for Firefox to close if the user agreed to wait
+      info "🔄 [ACTION] Waiting for Firefox to close..."
+    fi
+
+    # Loop and continuously check if Firefox is still running
+    while pgrep -x "firefox" > /dev/null; do
+      sleep 1
+    done
+
+    info "ℹ️ [INFO] Firefox has been closed. Continuing..."
+  done
 }
  #########################
 ## Main Functions
@@ -621,206 +649,213 @@ EOF
   info "ℹ️ [INFO] You can now manually run the Arkenfox Updater from the macOS Services menu."
 }
 
-# Installs Arkenfox, waits for Firefox to close, creates necessary files, and installs launch agents and Automator workflows
+# Installs Arkenfox, waits for Firefox to close, manages profile files, and installs macOS launch agents and Automator workflows
 install() {
-  local merge_wrote_changes="no"  # Initialize to avoid unbound variable error
-
   info "🔄 [ACTION] Starting installation..."
 
-  # Wait for Firefox to close before proceeding
-  while pgrep -x "firefox" >/dev/null; do
-    info "⚠️ [WARNING] Firefox is running. Please close it to continue the installation."
-    sleep 5
-  done
+  wait_for_firefox_to_close "⚠️ [WARNING] Firefox is running. Please close it to continue the installation."
 
   info "ℹ️ [INFO] Firefox is now closed. Continuing with the installation..."
 
-  debug "🔍 [DEBUG] Starting installation..."
-
   # Check for required tools (CLT, Git)
-  check_clt
-  check_git
+  check_clt || { 
+    error_exit "❌ [ERROR] Command Line Tools are not installed. Please install Xcode Command Line Tools." 
+  }
+
+  check_git || { 
+    error_exit "❌ [ERROR] Git is not installed. Please install Git." 
+  }
 
   # Create necessary directories for Arkenfox installation and logs
   mkdir -p "$ARKENFOX_DIR"
   mkdir -p "$LOG_DIR"
+  debug "🔍 [DEBUG] Created installation directories: $ARKENFOX_DIR, $LOG_DIR"
 
-  # Find the Firefox profile directory
+  # Clone or update Arkenfox repo
+  if [[ ! -d "$ARKENFOX_DIR/.git" ]]; then
+    info "🔄 [ACTION] Cloning Arkenfox user.js from GitHub..."
+    git clone https://github.com/arkenfox/user.js "$ARKENFOX_DIR"
+  else
+    info "🔄 [ACTION] Updating existing Arkenfox repository..."
+    cd "$ARKENFOX_DIR" && git pull
+  fi
+
+  # Find Firefox profile directory
   local profile_dir
   if ! profile_dir=$(find_profile); then
     error_exit "❌ [ERROR] Could not find Firefox default-release profile. Launch Firefox at least once before installing."
   fi
+  info "ℹ️ [INFO] Located Firefox profile directory: $profile_dir"
 
-  # Backup the Firefox configuration files
-  backup_firefox_config "$profile_dir"
+  # Backup Firefox preferences
+  backup_firefox_config "$profile_dir" || { 
+    error_exit "❌ [ERROR] Failed to backup Firefox configuration at $profile_dir." 
+  }
+  debug "🔍 [DEBUG] Firefox configuration backed up at $profile_dir."
 
-  # Create empty user-overrides.js if it does not exist
-  if [[ ! -f "$ARKENFOX_DIR/user-overrides.js" ]]; then
-    echo "// User overrides here" > "$ARKENFOX_DIR/user-overrides.js"
-    debug "🔍 [DEBUG] Created empty user-overrides.js."
+  # Ensure user-overrides.js exists in profile
+  if [[ ! -f "$profile_dir/user-overrides.js" ]]; then
+    echo "// Place your Arkenfox overrides here" > "$profile_dir/user-overrides.js"
+    info "ℹ️ [INFO] Created empty user-overrides.js in profile directory."
+    debug "🔍 [DEBUG] Created empty user-overrides.js at $profile_dir"
   fi
 
-  # Merge user.js and user-overrides.js
-  local merged_file
-  merged_file=$(merge_userjs "$profile_dir")
+  # Ensure updater and prefsCleaner.sh are executable
+  chmod +x "$ARKENFOX_DIR/updater.sh" "$ARKENFOX_DIR/prefsCleaner.sh"
+  debug "🔍 [DEBUG] Ensured updater.sh and prefsCleaner.sh are executable."
 
-  # Show diff and ask for confirmation
-  if show_diff_and_confirm "$profile_dir" "$merged_file"; then
-    cp "$merged_file" "$profile_dir/user.js"
-    log "ℹ️ [INFO] user.js updated in profile."
-    merge_wrote_changes="yes"
-  else
-    merge_wrote_changes="no"
-  fi
+  # Run prefsCleaner to strip old or conflicting prefs
+  info "🔄 [ACTION] Cleaning old Firefox preferences with prefsCleaner.sh..."
+  "$ARKENFOX_DIR/prefsCleaner.sh" "$profile_dir"
+  info "ℹ️ [INFO] prefs.js cleaned using prefsCleaner.sh."
 
-  # Clean up merged file after use
-  rm -f "$merged_file"
+  # Run updater to apply user.js + overrides
+  info "🔄 [ACTION] Applying Arkenfox user.js with updater.sh..."
+  "$ARKENFOX_DIR/updater.sh" "$profile_dir"
+  info "ℹ️ [INFO] Arkenfox user.js applied successfully."
 
-  # Install Automator and launchd configurations
-  install_automator
-  install_launchd
+  # Install Automator workflow and launchd agents (macOS-specific)
+  install_automator || { 
+    error_exit "❌ [ERROR] Failed to install Automator workflows." 
+  }
+  debug "🔍 [DEBUG] Automator workflows installed successfully."
 
-  # Rotate logs for the installation
-  rotate_log
+  # Install launchd agent
+  install_launchd || { 
+    error_exit "❌ [ERROR] Failed to install launchd agents." 
+  }
+  debug "🔍 [DEBUG] launchd agents installed successfully."
 
-  info "✅ [SUCCESS] Arkenfox installed successfully"
-  debug "🔍 [DEBUG] Installation complete."
+  # Attempt log rotation (failure won’t stop the installation)
+  rotate_log || info "⚠️ [WARNING] Log rotation failed, but continuing with installation."
+
+  info "✅ [SUCCESS] Arkenfox installation completed successfully."
+
+  # Final user feedback
+  info "ℹ️ [INFO] Please restart Firefox and verify your new privacy settings. You can test using sites like deviceinfo.me."
+  debug "🔍 [DEBUG] Installation completed successfully."
 }
 
-# Updates Arkenfox by pulling the latest repo changes, merging configs, and updating Firefox user.js
+# Updates Arkenfox by pulling the latest repo changes, cleaning prefs, backing up user.js, and applying new configs to Firefox
 update() {
   local DISPLAY_COUNT=3
   readonly DISPLAY_COUNT
 
-  local merge_wrote_changes="no"
-  local base_changed="no"
-  local changed_prefs=""
-  local count=0
-  local summary=""
+  info "🔄 [ACTION] Starting Arkenfox update..."
 
-  info "🔄 [ACTION] Starting update..."
+  # Ensure necessary tools are available (similar to install())
+  check_git || error_exit "❌ [ERROR] Git is not installed. Please install Git from https://git-scm.com/downloads."
+  check_clt || error_exit "❌ [ERROR] Command Line Tools are missing. Please install Xcode Command Line Tools from https://developer.apple.com/xcode/downloads/."
 
-  check_clt
-  check_git
+  [[ "$AUTO_UPDATE_MODE" == "1" ]] && debug "🔍 [DEBUG] Auto-update mode enabled."
 
-  [[ "$DEBUG_MODE" == "1" ]] && debug "🔍 [DEBUG] Debug mode enabled."
-  [[ "$AUTO_UPDATE_MODE" == "1" ]] && debug "🔁 [DEBUG] Auto-update mode enabled."
-
-  if [[ -d "$REPO_DIR/.git" ]]; then
-    cd "$REPO_DIR" || error_exit "❌ [ERROR] Failed to cd into $REPO_DIR."
-
-    # Compare Git hash to detect upstream changes
-    local old_hash new_hash
-    old_hash=$(shasum -a 256 user.js | awk '{print $1}')
-    git_output=$(git pull 2>&1) || error_exit "❌ [ERROR] Git pull failed: $git_output"
-    log "ℹ️ [INFO] Git pull output: $git_output"
-    new_hash=$(shasum -a 256 user.js | awk '{print $1}')
-    [[ "$old_hash" != "$new_hash" ]] && base_changed="yes"
-
-    # Locate Firefox profile
-    local profile_dir
-    profile_dir=$(find_profile) || error_exit "❌ [ERROR] Could not find Firefox profile. Launch Firefox at least once before updating."
-
-    # Define working files
-    local old_userjs="$profile_dir/user.js"
-    local tmp_old_userjs="$profile_dir/user.js.old.$(date +%s)"
-    local tmp_new_userjs="$profile_dir/user.js.new.$(date +%s)"
-
-    # Backup existing user.js if it exists
-    [[ -f "$old_userjs" ]] && cp "$old_userjs" "$tmp_old_userjs"
-
-    # Merge Arkenfox base with overrides
-    cat "$REPO_DIR/user.js" "$ARKENFOX_DIR/user-overrides.js" > "$tmp_new_userjs" || {
-      [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "❌ Failed to merge user.js. Update failed."
-      error_exit "❌ [ERROR] Failed to merge user.js and overrides."
-    }
-
-    # No changes detected
-    if cmp -s "$tmp_new_userjs" "$old_userjs"; then
-      if [[ "$base_changed" == "yes" ]]; then
-        info "✅ [SUCCESS] Downloaded latest Arkenfox user.js — Firefox profile already up to date."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Latest user.js downloaded, but your profile was already up to date."
-      else
-        info "ℹ️ [INFO] Arkenfox is already up to date — no changes in repo or user-overrides.js."
-        [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "ℹ️ Arkenfox is already up to date. No updates were needed — your profile remains unchanged."
-      fi
+  # Check if Firefox is running before proceeding with the update
+  if pgrep -x "firefox" > /dev/null; then
+    if [[ "$AUTO_UPDATE_MODE" != "1" ]]; then
+      wait_for_firefox_to_close "⚠️ [WARNING] Firefox is currently running. To avoid issues, please close Firefox before continuing with the update." 1
     else
-      if [[ "$AUTO_UPDATE_MODE" != "1" ]]; then
-        # INTERACTIVE UPDATE: Show diff and prompt
-        if show_diff_and_confirm "$profile_dir" "$tmp_new_userjs"; then
-          mv "$tmp_new_userjs" "$old_userjs"
-          merge_wrote_changes="yes"
-        else
-          info "ℹ️ [INFO] Update declined — user.js will not be modified."
-        fi
-      else
-        # AUTO UPDATE: Skip confirmation, apply changes
-        mv "$tmp_new_userjs" "$old_userjs"
-        merge_wrote_changes="yes"
-        info "✅ [SUCCESS] Arkenfox update applied automatically without user confirmation."
-      fi
-
-      # Log and summarize only if changes were written
-      if [[ "$merge_wrote_changes" == "yes" ]]; then
-        local diff_output=""
-        if [[ -f "$tmp_old_userjs" ]]; then
-          diff_output=$(diff -u "$tmp_old_userjs" "$old_userjs" || true)
-        else
-          diff_output="No previous user.js found. New preferences applied."
-        fi
-
-        {
-          echo "=== Arkenfox update diff at $(date) ==="
-          echo "$diff_output"
-          echo "========================================"
-        } >> "$LOG_FILE"
-
-        if [[ -f "$tmp_old_userjs" ]]; then
-          changed_prefs=$(echo "$diff_output" | grep '^+user_pref' | grep -v '^+++')
-          count=$(echo "$changed_prefs" | wc -l | tr -d ' ')
-          summary=$(echo "$changed_prefs" | head -n "$DISPLAY_COUNT" | sed -E 's/^\+user_pref\("([^"]+)".*/\1/' | paste -sd ', ' -)
-          rm -f "$tmp_old_userjs"
-
-          info "✅ [SUCCESS] $count prefs updated: $summary"
-
-          if [[ "$AUTO_UPDATE_MODE" == "1" ]]; then
-            if [[ "$count" -le "$DISPLAY_COUNT" ]]; then
-              notify "✅ Arkenfox update applied. $count preferences updated: $summary. 🔄 Please restart Firefox for the changes to take effect."
-            else
-              local more_count=$((count - DISPLAY_COUNT))
-              notify "✅ Arkenfox update applied. $count preferences updated: $summary… (+$more_count more). 🔄 Please restart Firefox for the changes to take effect."
-            fi
-          fi
-        else
-          info "⚙️ [CONFIG] Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
-          [[ "$AUTO_UPDATE_MODE" == "1" ]] && notify "✅ Arkenfox update applied. Configuration changes from user-overrides.js were successfully applied to the Firefox profile."
-        fi
-
-        # 🔁 POST-UPDATE CONTEXT MESSAGE
-        if [[ "$base_changed" == "yes" ]]; then
-          if pgrep -x "firefox" >/dev/null; then
-            info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile. Please restart Firefox for the changes to take effect."
-          else
-            info "✅ [SUCCESS] Downloaded latest Arkenfox user.js and applied updates to Firefox profile."
-          fi
-        else
-          if pgrep -x "firefox" >/dev/null; then
-            info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile. Please restart Firefox for the changes to take effect."
-          else
-            info "⚙️ [CONFIG] Applied new settings from user-overrides.js to Firefox profile."
-          fi
-        fi
-      fi
-
-      # Clean up new temp file
-      rm -f "$tmp_new_userjs"
+      info "⚠️ [WARNING] Firefox is running, but in auto-update mode, continuing without waiting."
     fi
-  else
-    error_exit "❌ [ERROR] Repository directory missing or corrupted: $REPO_DIR"
   fi
 
-  rotate_log
-  info "✅ [SUCCESS] Update complete."
+  # Ensure repository directory exists
+  [[ -d "$REPO_DIR/.git" ]] || error_exit "❌ [ERROR] Repository directory is missing or corrupted. Please ensure the Arkenfox repository is correctly cloned in $REPO_DIR."
+
+  cd "$REPO_DIR" || error_exit "❌ [ERROR] Failed to cd into $REPO_DIR."
+
+  # Pull latest repo changes
+  if ! git_output=$(git pull 2>&1); then
+    error_exit "❌ [ERROR] Git pull failed: $git_output"
+  fi
+  log "ℹ️ [INFO] Git pull output: $git_output"
+
+  # Locate Firefox profile directory
+  local profile_dir
+  profile_dir=$(find_profile) || error_exit "❌ [ERROR] Could not find Firefox profile. Launch Firefox at least once before updating."
+
+  # Backup existing user.js if it exists
+  local userjs_path="$profile_dir/user.js"
+  if [[ -f "$userjs_path" ]]; then
+    local backup_path="$profile_dir/user.js.bak.$(date +%s)"
+    cp "$userjs_path" "$backup_path"
+    info "ℹ️ [INFO] Backed up existing user.js to $backup_path"
+  else
+    info "⚠️ [WARNING] No existing user.js found to backup."
+  fi
+
+  # Run prefsCleaner.sh to clean old prefs
+  info "🔄 [ACTION] Running prefsCleaner.sh to clean old prefs..."
+  bash "$REPO_DIR/prefsCleaner.sh" "$profile_dir" || error_exit "❌ [ERROR] prefsCleaner.sh failed."
+
+  # Run updater.sh to generate new user.js
+  info "🔄 [ACTION] Running updater.sh to generate new user.js..."
+  local tmp_new_userjs="$profile_dir/user.js.new"
+  bash "$REPO_DIR/updater.sh" "$profile_dir" "$tmp_new_userjs" || error_exit "❌ [ERROR] updater.sh failed."
+
+  # Check if user.js changed
+  local userjs_changed="no"
+  if [[ -f "$userjs_path" ]] && ! cmp -s "$userjs_path" "$tmp_new_userjs"; then
+    userjs_changed="yes"
+  fi
+
+  if [[ "$userjs_changed" == "yes" ]]; then
+    # Find changed prefs keys
+    local changed_keys
+    changed_keys=$(diff -u "$userjs_path" "$tmp_new_userjs" | grep -E '^[+-]user_pref' | sed -E 's/^[+-]user_pref\("([^"]+)",.*$/\1/' | sort -u)
+
+    local -a prefs_array=()
+    mapfile -t prefs_array <<< "$changed_keys"
+
+    local num_prefs_updated=${#prefs_array[@]}
+
+    # Compose prefs summary string: first DISPLAY_COUNT prefs, then "+N more" if needed
+    local prefs_summary
+    if (( num_prefs_updated <= DISPLAY_COUNT )); then
+      prefs_summary=$(IFS=', '; echo "${prefs_array[*]}")
+    else
+      local first_prefs=("${prefs_array[@]:0:DISPLAY_COUNT}")
+      local remaining=$((num_prefs_updated - DISPLAY_COUNT))
+      prefs_summary="$(IFS=', '; echo "${first_prefs[*]}") (+$remaining more)"
+    fi
+
+    if [[ "$AUTO_UPDATE_MODE" != "1" ]]; then
+      # Interactive mode: show diff and confirm
+      info "🔄 [ACTION] Detected changes in your user.js. Displaying the differences for your review..."
+      diff -u "$userjs_path" "$tmp_new_userjs" | sed 's/^/    /'
+
+      echo
+      read -rp "📝 [COMMAND] Apply these changes to user.js? [y/N]: " confirm
+      confirm=$(to_lower "$confirm")   # <-- keep your to_lower function usage here
+      if [[ "$confirm" != "y" ]]; then
+        info "⚠️ [WARNING] Update aborted by user. No changes applied."
+        rm -f "$tmp_new_userjs"
+        return
+      fi
+
+      mv "$tmp_new_userjs" "$userjs_path"
+      info "✅ [SUCCESS] Applied updated user.js to profile."
+    else
+      # Auto-update mode: apply silently + notify
+      mv "$tmp_new_userjs" "$userjs_path"
+      local notify_msg="✅ Arkenfox update applied. $num_prefs_updated preferences updated: $prefs_summary. 🔄 Please restart Firefox for the changes to take effect."
+      notify "$notify_msg"
+    fi
+  else
+    # No changes detected
+    rm -f "$tmp_new_userjs"
+    if [[ "$AUTO_UPDATE_MODE" == "1" ]]; then
+      notify "ℹ️ Arkenfox update completed. No changes were needed: your Firefox profile is already using the latest settings."
+    else
+      info "ℹ️ [INFO] No changes detected in user.js. Your Firefox profile is already using the latest Arkenfox settings."
+    fi
+  fi
+
+  # Attempt log rotation (failure won’t stop the update)
+  rotate_log || info "⚠️ [WARNING] Log rotation failed. The update continues, but log management may need attention."
+
+  # Provide final feedback
+  info "🔄 [ACTION] Please restart Firefox to apply the latest privacy settings."
+  info "✅ [SUCCESS] Arkenfox update completed successfully."
 }
 
 # Uninstalls Arkenfox, restores Firefox prefs, removes backups, logs, and cleanup related files
