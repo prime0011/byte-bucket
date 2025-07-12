@@ -776,7 +776,7 @@ update() {
   # Backup existing user.js if it exists
   local userjs_path="$profile_dir/user.js"
   if [[ -f "$userjs_path" ]]; then
-    local backup_path="$profile_dir/user.js.bak.$(date +%s)"
+    local backup_path="$profile_dir/user.js.bak.$(date +%Y%m%d%H%M%S)"
     cp "$userjs_path" "$backup_path"
     info "ℹ️ [INFO] Backed up existing user.js to $backup_path"
   else
